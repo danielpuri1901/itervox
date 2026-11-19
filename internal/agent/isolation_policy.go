@@ -203,6 +203,10 @@ func dedupe(paths []string) []string {
 // and reflogs as writable, and the shared git dir (config, hooks,
 // packed-refs) as readable. A workspace whose .git is a directory (a full
 // clone) needs nothing extra.
+//
+// The shared reflog directory is created when it is missing. A new bare
+// clone has none: git makes it on the first commit in a worktree, and a
+// sandboxed git cannot, because a path that does not exist gets no rule.
 func worktreeGitDirs(ws string) (write, read []string) {
 	data, err := os.ReadFile(filepath.Join(ws, ".git"))
 	if err != nil {
@@ -225,7 +229,9 @@ func worktreeGitDirs(ws string) (write, read []string) {
 		}
 	}
 	read = append(read, common)
-	write = append(write, filepath.Join(common, "objects"), filepath.Join(common, "refs"), filepath.Join(common, "logs"))
+	logs := filepath.Join(common, "logs")
+	_ = os.Mkdir(logs, 0o755) // exists already, or stays out of the policy as before
+	write = append(write, filepath.Join(common, "objects"), filepath.Join(common, "refs"), logs)
 	return write, read
 }
 

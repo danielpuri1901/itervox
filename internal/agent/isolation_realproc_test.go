@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +10,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/vnovick/itervox/internal/config"
+	"github.com/vnovick/itervox/internal/gitexec"
+	"github.com/vnovick/itervox/internal/workspace"
 )
 
 // isolationFixture is a fake machine for the real-process isolation tests
@@ -91,6 +96,43 @@ func assertConfined(t *testing.T, m IsolationMechanism, f isolationFixture) {
 	assert.NoFileExists(t, filepath.Join(f.sibling, "g"))
 }
 
+// assertCommitsInNewWorktree is the acceptance for the first commit of a
+// run: git, sandboxed with the policy of a worktree that internal/workspace
+// has just made from a new bare clone, commits there. The commit writes the
+// branch's reflog under the shared git dir's logs/, and a new bare clone has
+// no logs/ yet.
+func assertCommitsInNewWorktree(t *testing.T, m IsolationMechanism) {
+	t.Helper()
+	ctx := context.Background()
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	origin := filepath.Join(base, "origin")
+	for _, args := range [][]string{
+		{"init", "-b", "main", origin},
+		{"-C", origin, "-c", "user.name=Test", "-c", "user.email=test@test.com", "commit", "--allow-empty", "-m", "init"},
+	} {
+		out, err := gitexec.Command(ctx, base, args...).CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, out)
+	}
+	cfg := &config.Config{}
+	cfg.Workspace.Root = filepath.Join(base, "workspaces", "proj")
+	cfg.Workspace.Worktree = true
+	cfg.Workspace.CloneURL = origin
+	cfg.Workspace.BaseBranch = "main"
+	ws, err := workspace.NewManager(cfg).EnsureWorkspace(ctx, "ISSUE-1", "itervox/issue-1")
+	require.NoError(t, err)
+	policy := BuildIsolationPolicy(IsolationInputs{Workspace: ws.Path, WorkspaceRoot: cfg.Workspace.Root})
+
+	git := gitexec.Command(ctx, ws.Path, "-c", "user.name=Agent", "-c", "user.email=agent@test.com",
+		"commit", "--allow-empty", "-m", "agent commit")
+	argv, err := m.Wrap(append([]string{git.Path}, git.Args[1:]...), policy)
+	require.NoError(t, err)
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Dir, cmd.Env = git.Dir, git.Env
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "a sandboxed git must be able to commit in a new worktree: %s", out)
+}
+
 // TestIsolationRealProcessBubblewrap is the Linux real-process acceptance
 // (#258) for bubblewrap. Skipped when bwrap is missing or cannot create a
 // sandbox on this machine.
@@ -103,6 +145,7 @@ func TestIsolationRealProcessBubblewrap(t *testing.T) {
 		t.Skipf("bubblewrap unavailable: %v", err)
 	}
 	assertConfined(t, m, newIsolationFixture(t))
+	assertCommitsInNewWorktree(t, m)
 }
 
 // TestIsolationRealProcessSandboxExec is the macOS real-process acceptance
@@ -114,4 +157,5 @@ func TestIsolationRealProcessSandboxExec(t *testing.T) {
 	m := newSandboxExec()
 	require.NoError(t, m.Available(), "sandbox-exec must work on the macOS runner")
 	assertConfined(t, m, newIsolationFixture(t))
+	assertCommitsInNewWorktree(t, m)
 }

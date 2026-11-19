@@ -17,4 +17,5 @@ func TestIsolationRealProcessLandlock(t *testing.T) {
 		t.Skipf("landlock unavailable: %v", err)
 	}
 	assertConfined(t, m, newIsolationFixture(t))
+	assertCommitsInNewWorktree(t, m)
 }
