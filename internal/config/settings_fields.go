@@ -346,7 +346,7 @@ var SettingFields = []SettingField{
 		Description: "Queue tracker writes and retry them when the tracker is unreachable."},
 	{Key: "tracker.project_slug", Type: TypeString, Group: "Tracker connection", Default: "",
 		Label:       "Project",
-		Description: "Linear project slugs (comma-separated) or the GitHub owner/repo."},
+		Description: "Linear project slugs or Jira project keys (comma-separated), or the GitHub owner/repo."},
 	{Key: "tracker.push_interval_ms", Type: TypeInteger, Group: "Tracker writes", Default: DefaultTrackerPushIntervalMs, Minimum: ptr(0),
 		Label:       "Push batching (ms)",
 		Description: "How long tracker writes are batched before they are sent. 0: no batching."},

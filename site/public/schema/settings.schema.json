@@ -997,7 +997,7 @@
         },
         "project_slug": {
           "default": "",
-          "description": "Linear project slugs (comma-separated) or the GitHub owner/repo.",
+          "description": "Linear project slugs or Jira project keys (comma-separated), or the GitHub owner/repo.",
           "title": "Project",
           "type": "string",
           "x-itervox-group": "Tracker connection"
