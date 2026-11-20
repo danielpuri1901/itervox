@@ -476,6 +476,51 @@ func TestValidateAcceptsJiraKind(t *testing.T) {
 	assert.True(t, config.TrackerNeedsAPIKey("jira"))
 }
 
+// TestJiraAcceptsSeveralProjectKeys: tracker.project_slug takes several
+// Jira project keys separated by commas, the form a Linear tracker takes
+// for several projects; spaces around a key are ignored.
+func TestJiraAcceptsSeveralProjectKeys(t *testing.T) {
+	for _, slug := range []string{`"PROJ, OPS"`, "PROJ,OPS", `"PROJ , OPS, DATA_1"`} {
+		t.Run(slug, func(t *testing.T) {
+			cfg, err := config.Load(workflowWithContent(t, jiraWorkflow("https://your-site.atlassian.net", slug, "me@example.com:token123")))
+			require.NoError(t, err)
+			require.NoError(t, config.ValidateDispatch(cfg))
+		})
+	}
+}
+
+// TestJiraRefusesABadKeyAmongSeveral: each of several keys must be a Jira
+// project key, and the error names the one that is not. One key keeps the
+// message it always had.
+func TestJiraRefusesABadKeyAmongSeveral(t *testing.T) {
+	tests := []struct {
+		name, slug, wantKey string
+	}{
+		{"lowercase key", `"PROJ, ops"`, `"ops"`},
+		{"empty key", `"PROJ,"`, `""`},
+		{"empty key in the middle", `"PROJ,,OPS"`, `""`},
+		{"key with a quote", `'PROJ, OPS" OR 1=1'`, `"OPS\" OR 1=1"`},
+		{"key with a space inside", `"PROJ, O PS"`, `"O PS"`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := config.Load(workflowWithContent(t, jiraWorkflow("https://your-site.atlassian.net", tc.slug, "me@example.com:token123")))
+			require.NoError(t, err)
+			err = config.ValidateDispatch(cfg)
+			require.Error(t, err)
+			assert.Equal(t, "tracker.project_slug: "+tc.wantKey+" is not a Jira project key for tracker.kind: jira (each key is capital letters, digits and _, starting with a letter; separate several keys with commas, like PROJ, OPS)", err.Error())
+		})
+	}
+
+	t.Run("one key keeps its message", func(t *testing.T) {
+		cfg, err := config.Load(workflowWithContent(t, jiraWorkflow("https://your-site.atlassian.net", "proj", "me@example.com:token123")))
+		require.NoError(t, err)
+		err = config.ValidateDispatch(cfg)
+		require.Error(t, err)
+		assert.Equal(t, "tracker.project_slug must be a Jira project key for tracker.kind: jira (capital letters, digits and _, starting with a letter, like PROJ)", err.Error())
+	})
+}
+
 func TestJiraRequiresEndpointProjectAndEmailToken(t *testing.T) {
 	const okEndpoint, okSlug, okKey = "https://your-site.atlassian.net", "PROJ", "me@example.com:token123"
 	tests := []struct {

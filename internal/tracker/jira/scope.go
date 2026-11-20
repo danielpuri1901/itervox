@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/vnovick/itervox/internal/domain"
@@ -12,13 +13,66 @@ import (
 	"github.com/vnovick/itervox/internal/tracker"
 )
 
-// The read scope is the project AND the assignee AND any of the labels, the
-// same meaning as tracker.assignee and tracker.labels have for Linear. Every
-// list read (the candidate poll and FetchIssuesByStates) compiles it to JQL
-// in statesJQL; MatchesFilter evaluates the same scope in memory on an issue
-// read by id, which is never narrowed. An email is not an assignee: Jira
-// Cloud can hide a user's email address (profile visibility), so an email
-// cannot be matched to an account reliably.
+// The read scope is any of the projects AND the assignee AND any of the
+// labels, the same meaning as tracker.project_slug, tracker.assignee and
+// tracker.labels have for Linear. Every list read (the candidate poll and
+// FetchIssuesByStates) compiles it to JQL in statesJQL; MatchesFilter
+// evaluates the same scope in memory on an issue read by id, which is never
+// narrowed. An email is not an assignee: Jira Cloud can hide a user's email
+// address (profile visibility), so an email cannot be matched to an account
+// reliably.
+
+// ProjectKeys returns the Jira project keys in slug, a tracker.project_slug
+// value: one key, or several separated by commas, the form a Linear tracker
+// takes for several projects. Each key is trimmed; empty entries and repeats
+// are dropped; the order is kept. The config check refuses an entry that is
+// not a project key, so the adapter never sends one.
+func ProjectKeys(slug string) []string {
+	var keys []string
+	for _, k := range strings.Split(slug, ",") {
+		if k = strings.TrimSpace(k); k != "" && !slices.Contains(keys, k) {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+// ProjectKeys returns the client's project keys, in the configured order.
+func (c *Client) ProjectKeys() []string { return slices.Clone(c.keys) }
+
+// firstProject is the first configured project key, or "" without one.
+func (c *Client) firstProject() string {
+	if len(c.keys) == 0 {
+		return ""
+	}
+	return c.keys[0]
+}
+
+// projectJQL is the JQL clause for the configured projects: project = "KEY"
+// for one key, the query a Jira tracker always sent, and
+// project in ("KEY1", "KEY2") for several.
+func (c *Client) projectJQL() string {
+	if len(c.keys) > 1 {
+		return "project in (" + jqlList(c.keys) + ")"
+	}
+	return "project = " + jqlQuote(c.firstProject())
+}
+
+// projectOfKey returns the project key part of an issue key ("OPS" for
+// "OPS-12"), or "" when issueKey has no "-". A project key has no "-".
+func projectOfKey(issueKey string) string {
+	project, _, found := strings.Cut(issueKey, "-")
+	if !found {
+		return ""
+	}
+	return project
+}
+
+// inProjects reports whether the issue key is in one of the configured
+// projects. A moved issue gets a key of its new project.
+func (c *Client) inProjects(issueKey string) bool {
+	return slices.Contains(c.keys, projectOfKey(issueKey))
+}
 
 // assigneeMe is the assignee spec for the token's own account.
 const assigneeMe = "me"
@@ -73,13 +127,14 @@ func (c *Client) ResolveAssignee(ctx context.Context) (tracker.AssigneeUser, err
 }
 
 // MatchesFilter implements tracker.ScopeMatcher: whether an issue read by id
-// is still inside the scope the list reads use — its key is in the project
-// (a moved issue gets another project's key), it is assigned to the
-// configured account, and it carries one of the labels (any case, as JQL
+// is still inside the scope the list reads use — its key is in one of the
+// configured projects (a moved issue gets its new project's key, so an issue
+// moved between two configured projects stays in scope), it is assigned to
+// the configured account, and it carries one of the labels (any case, as JQL
 // compares labels). It makes no request. known is false only for an
 // assignee of "me" before any list read has read the token's account.
 func (c *Client) MatchesFilter(issue domain.Issue) (match, known bool) {
-	if !strings.HasPrefix(issue.Identifier, c.cfg.ProjectSlug+"-") {
+	if !c.inProjects(issue.Identifier) {
 		return false, true
 	}
 	scope := issuefilter.FromLegacy(nil, c.cfg.Assignee, "", c.cfg.Labels)

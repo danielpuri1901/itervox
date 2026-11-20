@@ -57,7 +57,7 @@ func TestProjectStatusesUnionsIssueTypes(t *testing.T) {
 			{"id":"2","name":"Bug","subtask":false,"statuses":[{"id":"10","name":"To Do"},{"id":"13","name":"In Review"},{"id":"12","name":"Done"}]}
 		]`))
 	})
-	got, err := c.ProjectStatuses(t.Context())
+	got, err := c.ProjectStatuses(t.Context(), "PROJ")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"To Do", "In Progress", "Done", "In Review"}, got)
 	reqs := seen()
@@ -70,16 +70,16 @@ func TestProjectStatusesReportsMissingProject(t *testing.T) {
 	c, _ := newJiraServer(t, func(_ int, _ recorded, w http.ResponseWriter) {
 		w.WriteHeader(http.StatusNotFound)
 	})
-	_, err := c.ProjectStatuses(t.Context())
+	_, err := c.ProjectStatuses(t.Context(), "PROJ")
 	require.ErrorIs(t, err, tracker.ErrNotFound)
 	assert.Contains(t, err.Error(), "jira_statuses: project PROJ")
 }
 
 func TestProjectStatusesRefusesEmptyProjectKey(t *testing.T) {
 	c := jira.NewClient(jira.ClientConfig{Endpoint: "http://127.0.0.1:1", APIKey: "me@example.com:tok"})
-	_, err := c.ProjectStatuses(t.Context())
+	_, err := c.ProjectStatuses(t.Context(), "")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "tracker.project_slug is empty")
+	assert.Contains(t, err.Error(), "jira_statuses: no project key")
 }
 
 func TestProbeProjectAccessReportsMissingProject(t *testing.T) {

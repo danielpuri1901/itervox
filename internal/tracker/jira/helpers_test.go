@@ -40,6 +40,13 @@ func newJiraServer(t *testing.T, handler func(n int, r recorded, w http.Response
 // labels.
 func newScopedJiraServer(t *testing.T, assignee string, labels []string, handler func(n int, r recorded, w http.ResponseWriter)) (*jira.Client, func() []recorded) {
 	t.Helper()
+	return newProjectsJiraServer(t, "PROJ", assignee, labels, handler)
+}
+
+// newProjectsJiraServer is newScopedJiraServer with tracker.project_slug set
+// to projectSlug: one project key or several, separated by commas.
+func newProjectsJiraServer(t *testing.T, projectSlug, assignee string, labels []string, handler func(n int, r recorded, w http.ResponseWriter)) (*jira.Client, func() []recorded) {
+	t.Helper()
 	var mu sync.Mutex
 	var seen []recorded
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -56,7 +63,7 @@ func newScopedJiraServer(t *testing.T, assignee string, labels []string, handler
 	c := jira.NewClient(jira.ClientConfig{
 		Endpoint:     srv.URL + "/",
 		APIKey:       "me@example.com:tok",
-		ProjectSlug:  "PROJ",
+		ProjectSlug:  projectSlug,
 		ActiveStates: []string{"To Do", "In Progress"},
 		Assignee:     assignee,
 		Labels:       labels,

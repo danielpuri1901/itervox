@@ -186,9 +186,10 @@ type DoctorReport struct {
 	// Labels is the GitHub state-label check (#75). Zero value when the
 	// tracker is not GitHub.
 	Labels LabelCheck
-	// JiraStatuses checks that the configured states are statuses of the
-	// Jira project. Zero value when the tracker is not Jira.
-	JiraStatuses JiraStatusCheck
+	// JiraStatuses checks that the configured states are statuses of each
+	// configured Jira project, one check per project. Empty when the tracker
+	// is not Jira.
+	JiraStatuses []JiraStatusCheck
 	// Assignee is the Linear or Jira assignee-scope check (#182). Zero value when
 	// the tracker has no assignee scope.
 	Assignee AssigneeCheck
@@ -544,8 +545,8 @@ func doctorExitCode(report DoctorReport) int {
 		exitCode = 1
 	case report.LabelFixError != "":
 		exitCode = 1
-	case len(report.JiraStatuses.Missing) > 0:
-		// Likewise for a Jira state that is not a status of the project.
+	case jiraStatusesMissing(report.JiraStatuses):
+		// Likewise for a Jira state that is not a status of a project.
 		exitCode = 1
 	case report.BareFetch.Failing:
 		// #195: every new worktree starts from a base that no longer moves.
@@ -648,7 +649,7 @@ func renderDoctorReport(r DoctorReport) string {
 	renderDoctorSync(&b, r.Sync, r.SyncLagWarning)
 	renderBareFetchCheck(&b, r.BareFetch)
 	renderLabelCheck(&b, r.Labels)
-	renderJiraStatusCheck(&b, r.JiraStatuses)
+	renderJiraStatusChecks(&b, r.JiraStatuses)
 	renderAssigneeCheck(&b, r.Assignee)
 	renderFilterCheck(&b, r.Filter)
 	if r.LabelFixError != "" {

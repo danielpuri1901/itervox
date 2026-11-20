@@ -36,11 +36,11 @@ func jqlList(values []string) string {
 	return strings.Join(quoted, ", ")
 }
 
-// statesJQL builds the scoped query for the given state names: the project,
-// then the assignee and the labels when set, then the states. Without an
-// assignee or labels it is the project-only query.
+// statesJQL builds the scoped query for the given state names: the
+// projects (projectJQL), then the assignee and the labels when set, then the
+// states. Without an assignee or labels it is the project-only query.
 func (c *Client) statesJQL(states []string) string {
-	clauses := []string{"project = " + jqlQuote(c.cfg.ProjectSlug)}
+	clauses := []string{c.projectJQL()}
 	switch {
 	case isMe(c.cfg.Assignee):
 		clauses = append(clauses, "assignee = currentUser()")
@@ -60,10 +60,11 @@ func (c *Client) FetchCandidateIssues(ctx context.Context) ([]domain.Issue, erro
 	return c.FetchIssuesByStates(ctx, c.activeStates())
 }
 
-// FetchIssuesByStates returns the scope's issues (the project, narrowed by the
-// assignee and the labels) in any of the named states. Empty names return an
-// empty slice and make no request. With an assignee of "me", the first read
-// also reads the token's account (see resolveMe) and fails if it cannot.
+// FetchIssuesByStates returns the scope's issues (the projects, narrowed by
+// the assignee and the labels) in any of the named states. Empty names
+// return an empty slice and make no request. With an assignee of "me", the
+// first read also reads the token's account (see resolveMe) and fails if it
+// cannot.
 func (c *Client) FetchIssuesByStates(ctx context.Context, stateNames []string) ([]domain.Issue, error) {
 	if len(stateNames) == 0 {
 		return []domain.Issue{}, nil

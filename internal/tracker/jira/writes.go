@@ -214,8 +214,15 @@ func (c *Client) SetIssueBranch(ctx context.Context, issueID, branchName string)
 	return nil
 }
 
-// CreateIssue creates a follow-up issue in the configured project and returns
-// it as Jira now stores it. With a source issue, the new issue copies the
+// CreateIssue creates a follow-up issue and returns it as Jira now stores
+// it. With a source issue in one of the configured projects, the new issue
+// goes to that project: the follow-up belongs with the work it came from,
+// and the source's issue type, which it copies, is defined there (a
+// team-managed project has issue types of its own). The project is read from
+// the key Jira returns for the source, so a numeric id and a moved issue
+// give the project the source is in now. With no source, or a source in a
+// project that is not configured, it goes to the first configured project,
+// where a poll still finds it. With a source issue, the new issue copies the
 // source's issue type, unless that type is a sub-task; then, and with no
 // source, it is a "Task". The body is the description, sent like a comment
 // (see postText). Labels are trimmed and de-duplicated without case.
@@ -236,6 +243,7 @@ func (c *Client) CreateIssue(ctx context.Context, sourceIssueID string, in track
 		}
 	}
 	issuetype := map[string]any{"name": "Task"}
+	project := c.firstProject()
 	if sourceIssueID != "" {
 		var src map[string]any
 		if err := c.do(ctx, "GET", issuePath(sourceIssueID)+"?fields=issuetype", nil, &src); err != nil {
@@ -245,9 +253,12 @@ func (c *Client) CreateIssue(ctx context.Context, sourceIssueID string, in track
 		if id := str(nested(src, "fields", "issuetype", "id")); id != "" && !sub {
 			issuetype = map[string]any{"id": id}
 		}
+		if key := str(src["key"]); c.inProjects(key) {
+			project = projectOfKey(key)
+		}
 	}
 	fields := map[string]any{
-		"project":   map[string]any{"key": c.cfg.ProjectSlug},
+		"project":   map[string]any{"key": project},
 		"summary":   in.Title,
 		"issuetype": issuetype,
 	}

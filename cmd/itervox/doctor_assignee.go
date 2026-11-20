@@ -43,8 +43,9 @@ type AssigneeCheck struct {
 	Teams       []string
 	Issues      int
 	IssueTeams  []string
-	// Project is set for Jira: the read check counts the issues in its
-	// active states that the scoped poll reads.
+	// Project is set for Jira, to tracker.project_slug (one key or
+	// several): the read check counts the issues in the active states of
+	// those projects that the scoped poll reads.
 	Project string
 }
 
@@ -149,7 +150,7 @@ func renderAssigneeCheck(b *strings.Builder, ac AssigneeCheck) {
 		return
 	}
 	if ac.Project != "" {
-		fmt.Fprintf(b, "assignee reads: OK — %d issue(s) in the active states of project %s match tracker.assignee and tracker.labels\n", ac.Issues, ac.Project)
+		fmt.Fprintf(b, "assignee reads: OK — %d issue(s) in the active states of %s match tracker.assignee and tracker.labels\n", ac.Issues, jiraProjectsLabel(ac.Project))
 		return
 	}
 	teams := or(strings.Join(ac.Teams, ", "), "none")

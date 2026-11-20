@@ -46,7 +46,9 @@ type ClientConfig struct {
 	Endpoint string
 	// APIKey is "email:api_token"; it is sent as HTTP Basic auth.
 	APIKey string
-	// ProjectSlug is the Jira project key, e.g. "PROJ".
+	// ProjectSlug is the Jira project key, e.g. "PROJ", or several keys
+	// separated by commas, e.g. "PROJ, OPS": the form tracker.project_slug
+	// takes for several Linear projects. See ProjectKeys.
 	ProjectSlug  string
 	ActiveStates []string
 	// Assignee narrows every list read to the issues assigned to one
@@ -62,6 +64,10 @@ type ClientConfig struct {
 // Client is the Jira Cloud REST tracker adapter.
 type Client struct {
 	cfg ClientConfig
+	// keys are the project keys of cfg.ProjectSlug (ProjectKeys), set once
+	// by NewClient. Every list read and the incremental pull name them, and
+	// a read by id is in the scope only in one of them.
+	keys []string
 	// statesMu guards cfg.ActiveStates, which SetStateLists replaces at
 	// runtime. Read it through activeStates.
 	statesMu   sync.RWMutex
@@ -100,14 +106,16 @@ var (
 func (c *Client) RateLimitSnapshot() *tracker.RateLimitSnapshot { return nil }
 
 // NewClient creates a Jira Client. A single trailing "/" on cfg.Endpoint is
-// trimmed so request paths join cleanly. The assignee is trimmed, and the
-// labels are trimmed and de-duplicated without case, as JQL compares them.
+// trimmed so request paths join cleanly. The project keys are read from
+// cfg.ProjectSlug (ProjectKeys). The assignee is trimmed, and the labels are
+// trimmed and de-duplicated without case, as JQL compares them.
 func NewClient(cfg ClientConfig) *Client {
 	cfg.Endpoint = strings.TrimSuffix(cfg.Endpoint, "/")
 	cfg.Assignee = strings.TrimSpace(cfg.Assignee)
 	cfg.Labels = cleanLabels(cfg.Labels)
 	return &Client{
-		cfg: cfg,
+		cfg:  cfg,
+		keys: ProjectKeys(cfg.ProjectSlug),
 		httpClient: &http.Client{
 			Timeout: httpTimeout,
 			// The adapter never follows a redirect: Basic credentials must

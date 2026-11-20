@@ -11,7 +11,7 @@ import "strings"
 // review status, so a finished issue goes to Done.
 func writeJiraTrackerBlock(b *strings.Builder) {
 	b.WriteString("  endpoint: \"\"                     # Your Jira Cloud site URL, like https://your-site.atlassian.net ($VAR is not resolved here).\n")
-	b.WriteString("  project_slug: \"\"                 # The Jira project key, like PROJ (issue keys are PROJ-1, PROJ-2, …).\n")
+	b.WriteString("  project_slug: \"\"                 # The Jira project key, like PROJ (issue keys are PROJ-1, PROJ-2, …). Several projects: PROJ, OPS.\n")
 	b.WriteString("  # States are Jira status names. These are the statuses of a new team-managed\n")
 	b.WriteString("  # project and of a new company-managed Scrum project. A company-managed Kanban\n")
 	b.WriteString("  # project starts with Backlog, Selected for Development, In Progress and Done:\n")

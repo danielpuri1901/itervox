@@ -903,3 +903,289 @@ func TestJiraLiveStore(t *testing.T) {
 	assert.Zero(t, status.Failures)
 	assert.True(t, status.Cursor.After(cursor), "the cursor moved to the move's update time")
 }
+
+// moveLive moves an issue to another project through Jira Cloud's bulk move
+// (POST /rest/api/3/bulk/issues/move, the documented way to move issues
+// between projects), as the issue type of the same name in the target, with
+// Jira choosing the status and field values (the infer flags), and waits
+// until the move task completes (GET /rest/api/3/bulk/queue/{taskId}). The
+// adapter never moves issues, so the test does it itself.
+func moveLive(t *testing.T, endpoint, apiKey, issueID, target string) {
+	t.Helper()
+	var src struct {
+		Fields struct {
+			IssueType struct {
+				Name string `json:"name"`
+			} `json:"issuetype"`
+		} `json:"fields"`
+	}
+	require.Equal(t, http.StatusOK, liveJSON(t, endpoint, apiKey, http.MethodGet, "/rest/api/3/issue/"+issueID+"?fields=issuetype", nil, &src))
+	var proj struct {
+		IssueTypes []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"issueTypes"`
+	}
+	require.Equal(t, http.StatusOK, liveJSON(t, endpoint, apiKey, http.MethodGet, "/rest/api/3/project/"+target, nil, &proj))
+	typeID := ""
+	for _, it := range proj.IssueTypes {
+		if it.Name == src.Fields.IssueType.Name {
+			typeID = it.ID
+		}
+	}
+	require.NotEmpty(t, typeID, "project %s has no issue type %q", target, src.Fields.IssueType.Name)
+	var submitted struct {
+		TaskID string `json:"taskId"`
+	}
+	status := liveJSON(t, endpoint, apiKey, http.MethodPost, "/rest/api/3/bulk/issues/move", map[string]any{
+		"sendBulkNotification": false,
+		"targetToSourcesMapping": map[string]any{
+			target + "," + typeID: map[string]any{
+				"inferClassificationDefaults": true,
+				"inferFieldDefaults":          true,
+				"inferStatusDefaults":         true,
+				"inferSubtaskTypeDefault":     true,
+				"issueIdsOrKeys":              []string{issueID},
+			},
+		},
+	}, &submitted)
+	require.Equal(t, http.StatusCreated, status, "submit the bulk move")
+	require.NotEmpty(t, submitted.TaskID)
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		var task struct {
+			Status                          string  `json:"status"`
+			ProcessedAccessibleIssues       []int64 `json:"processedAccessibleIssues"`
+			InvalidOrInaccessibleIssueCount int     `json:"invalidOrInaccessibleIssueCount"`
+		}
+		require.Equal(t, http.StatusOK, liveJSON(t, endpoint, apiKey, http.MethodGet, "/rest/api/3/bulk/queue/"+submitted.TaskID, nil, &task))
+		switch task.Status {
+		case "COMPLETE":
+			require.Zero(t, task.InvalidOrInaccessibleIssueCount, "the move skipped the issue")
+			require.Len(t, task.ProcessedAccessibleIssues, 1)
+			assert.Equal(t, issueID, strconv.FormatInt(task.ProcessedAccessibleIssues[0], 10))
+			return
+		case "FAILED", "CANCELLED", "CANCEL_REQUESTED":
+			t.Fatalf("bulk move task %s ended %s", submitted.TaskID, task.Status)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("bulk move task %s still %s after 2 minutes", submitted.TaskID, task.Status)
+		}
+		time.Sleep(time.Second)
+	}
+}
+
+// TestJiraLiveSeveralProjects proves a tracker with two Jira projects on a
+// real Jira Cloud site. It needs JIRA_SECOND_PROJECT (a second project key)
+// besides the environment of TestJiraLiveRoundTrip, and skips without it.
+// All its issues carry a label of their own, and every client is scoped by
+// that label, so no other issue of either project counts.
+//
+// It probes both projects and reads their statuses; creates an issue in the
+// first project (no source issue), one in the second (a client that lists
+// the second first), and a follow-up whose source is in the second project,
+// which must go there. The two-project client must list all three, by
+// search and by the incremental pull, and read each by key; the
+// first-project client must list only the first project's issue and refuse
+// a second-project key.
+//
+// Then it moves the first issue to the second project with Jira's bulk move
+// while two tracker stores run (as the daemon runs them for Jira): one over
+// the two-project client, one over the first-project client. The moved
+// issue keeps its numeric id and gets a second-project key. For the
+// two-project tracker it stays in scope: MatchesFilter, a read by its old
+// key, and the store's candidates (under the new key). For the
+// first-project tracker it leaves the scope: MatchesFilter says so, a read
+// by its old key is not found, and the store no longer offers it once a
+// read by id has seen the new key (an incremental pull can drop it sooner).
+//
+// Every issue is moved to the done state at the end. It never prints the
+// API key, the site or the account.
+func TestJiraLiveSeveralProjects(t *testing.T) {
+	endpoint := os.Getenv("JIRA_ENDPOINT")
+	first := os.Getenv("JIRA_PROJECT")
+	second := os.Getenv("JIRA_SECOND_PROJECT")
+	apiKey := os.Getenv("JIRA_API_KEY")
+	if endpoint == "" || first == "" || second == "" || apiKey == "" {
+		t.Skip("set JIRA_ENDPOINT, JIRA_PROJECT, JIRA_SECOND_PROJECT and JIRA_API_KEY to run the live Jira several-projects test")
+	}
+	active := splitCSV(envOr("JIRA_ACTIVE_STATES", "To Do,In Progress"))
+	done := envOr("JIRA_DONE_STATE", "Done")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	stamp := time.Now().Unix()
+	label := fmt.Sprintf("itervox-projects-%d", stamp)
+	newClient := func(slug string) *jira.Client {
+		return jira.NewClient(jira.ClientConfig{Endpoint: endpoint, APIKey: apiKey, ProjectSlug: slug, ActiveStates: active, Labels: []string{label}})
+	}
+	both := newClient(first + ", " + second)
+	firstOnly := newClient(first)
+	secondFirst := newClient(second + ", " + first)
+	require.Equal(t, []string{first, second}, both.ProjectKeys())
+
+	// a. doctor's reads: both projects, and the statuses of each.
+	account, err := both.ProbeProjectAccess(ctx)
+	require.NoError(t, err)
+	require.NotEmpty(t, account)
+	for _, key := range both.ProjectKeys() {
+		statuses, err := both.ProjectStatuses(ctx, key)
+		require.NoError(t, err)
+		for _, s := range append(slices.Clone(active), done) {
+			assert.True(t, slices.ContainsFunc(statuses, func(have string) bool { return strings.EqualFold(have, s) }), "%q is a status of %s", s, key)
+		}
+		t.Logf("probe: project %s readable, statuses %v", key, statuses)
+	}
+
+	// b. three issues: the first project by default, the second, and a
+	// follow-up of the second project's issue.
+	var created []*domain.Issue
+	create := func(c *jira.Client, source, name string, blocked bool) *domain.Issue {
+		t.Helper()
+		is, err := c.CreateIssue(ctx, source, tracker.NewIssue{
+			Title: fmt.Sprintf("itervox projects %d %s", stamp, name), Labels: []string{label},
+			State: active[0], BlockedBySource: blocked,
+		})
+		require.NoError(t, err)
+		id := is.ID
+		t.Cleanup(func() {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := both.UpdateIssueState(cleanupCtx, id, done); err != nil {
+				t.Logf("cleanup: move %s to %q: %v", id, done, err)
+			}
+		})
+		created = append(created, is)
+		return is
+	}
+	a := create(both, "", "first-project", false)
+	c := create(secondFirst, "", "second-project", false)
+	b := create(both, c.ID, "follow-up-of-second", true)
+	assert.True(t, strings.HasPrefix(a.Identifier, first+"-"), "no source: the first configured project, got %s", a.Identifier)
+	assert.True(t, strings.HasPrefix(c.Identifier, second+"-"), "got %s", c.Identifier)
+	assert.True(t, strings.HasPrefix(b.Identifier, second+"-"), "a follow-up goes to its source's project, got %s", b.Identifier)
+	if assert.Len(t, b.BlockedBy, 1) && assert.NotNil(t, b.BlockedBy[0].Identifier) {
+		assert.Equal(t, c.Identifier, *b.BlockedBy[0].Identifier)
+	}
+	t.Logf("created %s (no source), %s (client listing %s first), %s (follow-up of %s, blocked by it)", a.Identifier, c.Identifier, second, b.Identifier, c.Identifier)
+
+	// c. list reads and the incremental pull (search lags writes: poll).
+	ours := func(list []domain.Issue) []string {
+		var out []string
+		for _, is := range list {
+			if slices.ContainsFunc(created, func(mine *domain.Issue) bool { return mine.ID == is.ID }) {
+				out = append(out, is.Identifier)
+			}
+		}
+		slices.Sort(out)
+		return out
+	}
+	sorted := func(keys ...string) []string { slices.Sort(keys); return keys }
+	eventually := func(what string, want []string, list func() []domain.Issue) {
+		t.Helper()
+		deadline := time.Now().Add(90 * time.Second)
+		for {
+			got := ours(list())
+			if slices.Equal(got, want) {
+				t.Logf("%s: %v", what, got)
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("after 90s %s lists %v, want %v", what, got, want)
+			}
+			time.Sleep(2 * time.Second)
+		}
+	}
+	candidates := func(tr tracker.Tracker) func() []domain.Issue {
+		return func() []domain.Issue {
+			got, err := tr.FetchCandidateIssues(ctx)
+			require.NoError(t, err)
+			return got
+		}
+	}
+	all := sorted(a.Identifier, b.Identifier, c.Identifier)
+	eventually("two-project search", all, candidates(both))
+	eventually("first-project search", []string{a.Identifier}, candidates(firstOnly))
+	eventually("two-project incremental pull", all, func() []domain.Issue {
+		changed, gone, err := both.FetchIssuesUpdatedSince(ctx, time.Unix(stamp, 0))
+		require.NoError(t, err)
+		for _, mine := range created {
+			require.NotContains(t, gone, mine.ID, "the scope keeps %s", mine.Identifier)
+		}
+		return changed
+	})
+
+	// d. reads by key.
+	for _, is := range []*domain.Issue{a, c} {
+		got, err := both.FetchIssueByIdentifier(ctx, is.Identifier)
+		require.NoError(t, err)
+		assert.Equal(t, is.ID, got.ID)
+	}
+	_, err = firstOnly.FetchIssueByIdentifier(ctx, c.Identifier)
+	require.ErrorIs(t, err, tracker.ErrNotFound, "a key of a project that is not configured")
+	t.Logf("by key: the two-project client reads %s and %s; the first-project client refuses %s", a.Identifier, c.Identifier, c.Identifier)
+
+	// e. two stores, as the daemon runs them for Jira.
+	runStore := func(name string, up *jira.Client) (tracker.Tracker, *store.Store) {
+		t.Helper()
+		tr, st, err := store.Wrap(up, store.Config{
+			Path: t.TempDir() + "/tracker_store.json", Scope: "jira-live-" + name, ActiveStates: active,
+			Views: [][]string{append(slices.Clone(active), done)}, SyncInterval: 2 * time.Second,
+			FullSyncInterval: time.Hour, ListingsLagWrites: true,
+		})
+		require.NoError(t, err)
+		runDone := make(chan struct{})
+		go func() { defer close(runDone); st.Run(ctx) }()
+		t.Cleanup(func() { cancel(); <-runDone })
+		return tr, st
+	}
+	bothStore, _ := runStore("both", both)
+	firstStore, _ := runStore("first", firstOnly)
+	eventually("two-project store candidates before the move", all, candidates(bothStore))
+	eventually("first-project store candidates before the move", []string{a.Identifier}, candidates(firstStore))
+
+	// f. move a to the second project.
+	oldKey := a.Identifier
+	moveLive(t, endpoint, apiKey, a.ID, second)
+	moved, err := both.FetchIssueStatesByIDs(ctx, []string{a.ID})
+	require.NoError(t, err)
+	require.Len(t, moved, 1)
+	newKey := moved[0].Identifier
+	require.True(t, strings.HasPrefix(newKey, second+"-"), "moved: %s", newKey)
+	assert.Contains(t, moved[0].Labels, label, "the move keeps the label")
+	assert.True(t, slices.ContainsFunc(active, func(s string) bool { return strings.EqualFold(s, moved[0].State) }), "still active: %q", moved[0].State)
+	t.Logf("moved %s to %s: id %s kept, now %s in %q with label kept", oldKey, second, a.ID, newKey, moved[0].State)
+
+	// The two-project tracker keeps it.
+	match, known := both.MatchesFilter(moved[0])
+	assert.True(t, known)
+	assert.True(t, match, "two projects: %s is in scope", newKey)
+	byOld, err := both.FetchIssueByIdentifier(ctx, oldKey)
+	require.NoError(t, err, "two projects: Jira follows the old key to the new one")
+	assert.Equal(t, newKey, byOld.Identifier)
+	eventually("two-project store candidates after the move", sorted(newKey, b.Identifier, c.Identifier), candidates(bothStore))
+	t.Logf("two projects: MatchesFilter(%s) = in scope; read by old key %s returns %s; the store lists it under %s", newKey, oldKey, byOld.Identifier, newKey)
+
+	// The first-project tracker loses it.
+	match, known = firstOnly.MatchesFilter(moved[0])
+	assert.True(t, known)
+	assert.False(t, match, "one project: %s is out of scope", newKey)
+	_, err = firstOnly.FetchIssueByIdentifier(ctx, oldKey)
+	require.ErrorIs(t, err, tracker.ErrNotFound, "one project: the old key now leads out of the project")
+	// Measured on 2026-11-20: for about half a second after the move, a
+	// search for the first project still lists the issue, under its new key.
+	// An incremental pull in that window reports it gone (MatchesFilter);
+	// after it, the pulls do not list it at all and the store keeps offering
+	// it under the old key until a read by id shows the new one.
+	time.Sleep(6 * time.Second) // three incremental pulls of the first-project store
+	stale := ours(candidates(firstStore)())
+	if len(stale) == 0 {
+		t.Logf("one project: an incremental pull already dropped %s (its search listed it under %s)", oldKey, newKey)
+	} else {
+		assert.Equal(t, []string{oldKey}, stale)
+		t.Logf("one project: the incremental pulls no longer list it, and the store still offers it as %s", oldKey)
+	}
+	_, err = firstStore.FetchIssueStatesByIDs(ctx, []string{a.ID}) // the by-id read a claim check or a retry makes
+	require.NoError(t, err)
+	assert.Empty(t, ours(candidates(firstStore)()), "one project: after a read by id the store no longer offers the moved issue")
+	t.Logf("one project: MatchesFilter(%s) = out of scope; read by old key %s = not found; after a read by id the store offers %v", newKey, oldKey, ours(candidates(firstStore)()))
+}

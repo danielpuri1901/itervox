@@ -25,30 +25,31 @@ import (
 const searchLag = 4 * time.Minute
 
 // FetchIssuesUpdatedSince implements tracker.IncrementalFetcher (#114): the
-// project's issues updated at or after since less searchLag, in any status,
-// newest update first, in one paginated search. The time is sent as
-// unquoted epoch milliseconds, which JQL compares to the millisecond in any
-// time zone; a quoted date would be read in the token's profile time zone,
-// to the minute.
+// configured projects' issues updated at or after since less searchLag, in
+// any status, newest update first, in one paginated search. The time is
+// sent as unquoted epoch milliseconds, which JQL compares to the millisecond
+// in any time zone; a quoted date would be read in the token's profile time
+// zone, to the minute.
 //
-// The query names only the project. The assignee and the labels are applied
-// to each listed issue in memory, by MatchesFilter, the same scope the list
-// reads compile into JQL: an issue they no longer cover (reassigned, label
-// removed) is returned in gone, so the store drops it at this pull. The
-// others are changed, whatever their status: the store places each by
-// status, and one in a status no list tracks leaves every list. A deleted
-// issue, or one moved to another project, is not listed at all; the store's
-// full pull removes it. A failed page fails the call with nothing returned.
-// With an assignee of "me", the token's account is read first (resolveMe)
-// and the call fails if it cannot be.
+// The query names only the projects (projectJQL, as the list reads name
+// them). The assignee and the labels are applied to each listed issue in
+// memory, by MatchesFilter, the same scope the list reads compile into JQL:
+// an issue they no longer cover (reassigned, label removed) is returned in
+// gone, so the store drops it at this pull. The others are changed, whatever
+// their status: the store places each by status, and one in a status no list
+// tracks leaves every list. A deleted issue, or one moved to a project that
+// is not configured, is not listed at all; the store's full pull removes it.
+// A failed page fails the call with nothing returned. With an assignee of
+// "me", the token's account is read first (resolveMe) and the call fails if
+// it cannot be.
 func (c *Client) FetchIssuesUpdatedSince(ctx context.Context, since time.Time) (changed []domain.Issue, gone []string, err error) {
 	if isMe(c.cfg.Assignee) {
 		if err := c.resolveMe(ctx); err != nil {
 			return nil, nil, err
 		}
 	}
-	jql := fmt.Sprintf("project = %s AND updated >= %d ORDER BY updated DESC",
-		jqlQuote(c.cfg.ProjectSlug), since.Add(-searchLag).UnixMilli())
+	jql := fmt.Sprintf("%s AND updated >= %d ORDER BY updated DESC",
+		c.projectJQL(), since.Add(-searchLag).UnixMilli())
 	raws, err := c.search(ctx, jql)
 	if err != nil {
 		return nil, nil, fmt.Errorf("jira_search_updated: %w", err)

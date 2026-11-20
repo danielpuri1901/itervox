@@ -42,20 +42,42 @@ func TrackerNeedsAPIKey(kind string) bool {
 }
 
 // validateJira checks the Jira Cloud connection keys: an https site URL with
-// no userinfo, path, query or fragment, a project key, and an api_key of the
-// form email:api_token. No error includes the endpoint or the api_key value.
+// no userinfo, path, query or fragment, one or several project keys
+// (validateJiraProjectKeys), and an api_key of the form email:api_token. No
+// error includes the endpoint or the api_key value.
 func validateJira(t TrackerConfig) error {
 	u, err := url.Parse(t.Endpoint)
 	if t.Endpoint == "" || err != nil || u.Scheme != "https" || u.Host == "" ||
 		u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 		return errors.New("tracker.endpoint must be an https:// URL with a host and nothing after it for tracker.kind: jira (your Jira Cloud site, like https://your-site.atlassian.net)")
 	}
-	if !jiraProjectKeyRe.MatchString(t.ProjectSlug) {
-		return errors.New("tracker.project_slug must be a Jira project key for tracker.kind: jira (capital letters, digits and _, starting with a letter, like PROJ)")
+	if err := validateJiraProjectKeys(t.ProjectSlug); err != nil {
+		return err
 	}
 	email, token, ok := strings.Cut(t.APIKey, ":")
 	if !ok || !strings.Contains(email, "@") || token == "" {
 		return errors.New("tracker.api_key must be email:api_token for tracker.kind: jira (an account email, a colon, then an API token)")
+	}
+	return nil
+}
+
+// validateJiraProjectKeys checks tracker.project_slug for Jira: one project
+// key, or several separated by commas (the form a Linear tracker takes for
+// several projects), with spaces around each key ignored. Each key must
+// match jiraProjectKeyRe, and an empty entry is refused. One key keeps the
+// message it always had; with several, the message names the key that is
+// not one.
+func validateJiraProjectKeys(slug string) error {
+	if !strings.Contains(slug, ",") {
+		if !jiraProjectKeyRe.MatchString(slug) {
+			return errors.New("tracker.project_slug must be a Jira project key for tracker.kind: jira (capital letters, digits and _, starting with a letter, like PROJ)")
+		}
+		return nil
+	}
+	for _, key := range strings.Split(slug, ",") {
+		if key = strings.TrimSpace(key); !jiraProjectKeyRe.MatchString(key) {
+			return fmt.Errorf("tracker.project_slug: %q is not a Jira project key for tracker.kind: jira (each key is capital letters, digits and _, starting with a letter; separate several keys with commas, like PROJ, OPS)", key)
+		}
 	}
 	return nil
 }

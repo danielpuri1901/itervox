@@ -186,11 +186,13 @@ func jiraStatusConfig(endpoint string) *config.Config {
 // the project has and fail doctor; a read error is reported, never fatal.
 func TestDoctorJiraStatusCheck(t *testing.T) {
 	t.Run("missing", func(t *testing.T) {
-		sc := checkJiraStatuses(t.Context(), jiraStatusConfig(fakeJiraStatuses(t, 0, "To Do", "In Progress", "Done")), true)
+		checks := checkJiraStatuses(t.Context(), jiraStatusConfig(fakeJiraStatuses(t, 0, "To Do", "In Progress", "Done")), true)
+		require.Len(t, checks, 1)
+		sc := checks[0]
 		require.True(t, sc.Ran, sc.APIError)
 		assert.Equal(t, []string{"to do", "In Progress", "In Review", "Done", "Closed", "Backlog"}, sc.Checked)
 		assert.Equal(t, []string{"In Review", "Closed", "Backlog"}, sc.Missing)
-		report := DoctorReport{SchemaPassed: true, JiraStatuses: sc}
+		report := DoctorReport{SchemaPassed: true, JiraStatuses: checks}
 		assert.Equal(t, 1, doctorExitCode(report))
 		out := renderDoctorReport(report)
 		assert.Contains(t, out, `ERROR: 3 configured state(s) are not statuses of Jira project KAN: "In Review", "Closed", "Backlog"`)
@@ -198,27 +200,31 @@ func TestDoctorJiraStatusCheck(t *testing.T) {
 		assert.Contains(t, out, "itervox config show")
 	})
 	t.Run("all present", func(t *testing.T) {
-		sc := checkJiraStatuses(t.Context(), jiraStatusConfig(fakeJiraStatuses(t, 0, "TO DO", "In Progress", "In Review", "Done", "Backlog", "Closed")), true)
+		checks := checkJiraStatuses(t.Context(), jiraStatusConfig(fakeJiraStatuses(t, 0, "TO DO", "In Progress", "In Review", "Done", "Backlog", "Closed")), true)
+		require.Len(t, checks, 1)
+		sc := checks[0]
 		require.True(t, sc.Ran, sc.APIError)
 		assert.Empty(t, sc.Missing)
-		report := DoctorReport{SchemaPassed: true, JiraStatuses: sc}
+		report := DoctorReport{SchemaPassed: true, JiraStatuses: checks}
 		assert.Equal(t, 0, doctorExitCode(report))
 		assert.Contains(t, renderDoctorReport(report), "jira statuses: OK (6 configured states are statuses of project KAN)")
 	})
 	t.Run("read error", func(t *testing.T) {
-		sc := checkJiraStatuses(t.Context(), jiraStatusConfig(fakeJiraStatuses(t, http.StatusUnauthorized)), true)
+		checks := checkJiraStatuses(t.Context(), jiraStatusConfig(fakeJiraStatuses(t, http.StatusUnauthorized)), true)
+		require.Len(t, checks, 1)
+		sc := checks[0]
 		assert.False(t, sc.Ran)
 		assert.Contains(t, sc.APIError, "401")
-		report := DoctorReport{SchemaPassed: true, JiraStatuses: sc}
+		report := DoctorReport{SchemaPassed: true, JiraStatuses: checks}
 		assert.Equal(t, 0, doctorExitCode(report), "a read error is reported, never fatal")
 		assert.Contains(t, renderDoctorReport(report), "jira statuses: could not check project KAN: ")
 	})
 	t.Run("not run", func(t *testing.T) {
-		assert.Equal(t, JiraStatusCheck{}, checkJiraStatuses(t.Context(), jiraStatusConfig("http://127.0.0.1:1"), false),
+		assert.Empty(t, checkJiraStatuses(t.Context(), jiraStatusConfig("http://127.0.0.1:1"), false),
 			"an invalid workflow: the schema error already says what is wrong")
 		github := jiraStatusConfig("http://127.0.0.1:1")
 		github.Tracker.Kind = "github"
-		assert.Equal(t, JiraStatusCheck{}, checkJiraStatuses(t.Context(), github, true))
+		assert.Empty(t, checkJiraStatuses(t.Context(), github, true))
 	})
 }
 
@@ -233,9 +239,10 @@ func TestDoctorRunsJiraStatusCheck(t *testing.T) {
 
 	report, _ := collectDoctorReport(path)
 	require.True(t, report.SchemaPassed, report.WorkflowError)
-	assert.Equal(t, "KAN", report.JiraStatuses.Project)
-	assert.Equal(t, []string{"To Do", "In Progress", "Done"}, report.JiraStatuses.Checked)
-	assert.NotEmpty(t, report.JiraStatuses.APIError)
+	require.Len(t, report.JiraStatuses, 1)
+	assert.Equal(t, "KAN", report.JiraStatuses[0].Project)
+	assert.Equal(t, []string{"To Do", "In Progress", "Done"}, report.JiraStatuses[0].Checked)
+	assert.NotEmpty(t, report.JiraStatuses[0].APIError)
 	assert.Contains(t, renderDoctorReport(report), "jira statuses: could not check project KAN: ")
 }
 
@@ -368,4 +375,139 @@ func TestDoctorDeployJiraProbe(t *testing.T) {
 		assert.Equal(t, deployFail, got.Status)
 		assert.Contains(t, got.Detail, "JIRA_API_KEY")
 	})
+}
+
+// fakeJiraProjects serves a site with several projects: GET
+// /rest/api/3/myself, GET /rest/api/3/project/<key> for each key in
+// statuses, and GET /rest/api/3/project/<key>/statuses with that key's
+// statuses on one issue type. A key whose list is nil answers 404.
+func fakeJiraProjects(t *testing.T, statuses map[string][]string) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/rest/api/3/myself" {
+			_, _ = w.Write([]byte(`{"accountId":"abc","displayName":"Ada Lovelace"}`))
+			return
+		}
+		rest, ok := strings.CutPrefix(r.URL.Path, "/rest/api/3/project/")
+		key, wantStatuses := strings.CutSuffix(rest, "/statuses")
+		names, known := statuses[key]
+		if !ok || !known || names == nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if !wantStatuses {
+			_ = json.NewEncoder(w).Encode(map[string]string{"key": key})
+			return
+		}
+		list := make([]map[string]string, 0, len(names))
+		for i, n := range names {
+			list = append(list, map[string]string{"id": strconv.Itoa(i), "name": n})
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "1", "name": "Task", "statuses": list}})
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// TestDoctorJiraStatusCheckPerProject: with several projects, doctor checks
+// the configured states against the statuses of each project and names the
+// project in every line; a state missing in one project fails doctor, and a
+// project it cannot read is reported without hiding the others.
+func TestDoctorJiraStatusCheckPerProject(t *testing.T) {
+	all := []string{"To Do", "In Progress", "In Review", "Done", "Backlog", "Closed"}
+	t.Run("missing in one project", func(t *testing.T) {
+		cfg := jiraStatusConfig(fakeJiraProjects(t, map[string][]string{
+			"KAN": all,
+			"OPS": {"To Do", "In Progress", "Done", "Backlog", "Closed"},
+		}))
+		cfg.Tracker.ProjectSlug = "KAN, OPS"
+
+		checks := checkJiraStatuses(t.Context(), cfg, true)
+
+		require.Len(t, checks, 2)
+		assert.Equal(t, "KAN", checks[0].Project)
+		assert.Empty(t, checks[0].Missing)
+		assert.Equal(t, "OPS", checks[1].Project)
+		assert.Equal(t, []string{"In Review"}, checks[1].Missing)
+		report := DoctorReport{SchemaPassed: true, JiraStatuses: checks}
+		assert.Equal(t, 1, doctorExitCode(report))
+		out := renderDoctorReport(report)
+		assert.Contains(t, out, "jira statuses: OK (6 configured states are statuses of project KAN)\n")
+		assert.Contains(t, out, `ERROR: 1 configured state(s) are not statuses of Jira project OPS: "In Review"`)
+		assert.Contains(t, out, "  statuses in OPS: To Do, In Progress, Done, Backlog, Closed\n")
+	})
+	t.Run("one project unreadable", func(t *testing.T) {
+		cfg := jiraStatusConfig(fakeJiraProjects(t, map[string][]string{"KAN": all, "OPS": nil}))
+		cfg.Tracker.ProjectSlug = "KAN, OPS"
+
+		checks := checkJiraStatuses(t.Context(), cfg, true)
+
+		require.Len(t, checks, 2)
+		assert.True(t, checks[0].Ran)
+		assert.False(t, checks[1].Ran)
+		report := DoctorReport{SchemaPassed: true, JiraStatuses: checks}
+		assert.Equal(t, 0, doctorExitCode(report), "a read error is reported, never fatal")
+		out := renderDoctorReport(report)
+		assert.Contains(t, out, "jira statuses: OK (6 configured states are statuses of project KAN)\n")
+		assert.Contains(t, out, "jira statuses: could not check project OPS: ")
+	})
+}
+
+// TestDoctorDeployJiraProbeSeveralProjects: `doctor --deploy` reads every
+// configured project and names them; one it cannot read fails the check
+// with that project named.
+func TestDoctorDeployJiraProbeSeveralProjects(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Tracker.Kind = "jira"
+	cfg.Tracker.APIKey = "me@example.com:tok"
+	cfg.Tracker.ProjectSlug = "KAN, OPS"
+
+	cfg.Tracker.Endpoint = fakeJiraProjects(t, map[string][]string{"KAN": {}, "OPS": {}})
+	got := trackerAPICheck(t.Context(), cfg, defaultDeployProbeEnv())
+	assert.Equal(t, deployOK, got.Status, got.Detail)
+	assert.Equal(t, "jira token valid (account: Ada Lovelace); projects KAN, OPS can be read", got.Detail)
+
+	cfg.Tracker.ProjectSlug = "KAN"
+	got = trackerAPICheck(t.Context(), cfg, defaultDeployProbeEnv())
+	assert.Equal(t, "jira token valid (account: Ada Lovelace); project KAN can be read", got.Detail, "one project: the message it always had")
+
+	cfg.Tracker.ProjectSlug = "KAN, OPS"
+	cfg.Tracker.Endpoint = fakeJiraProjects(t, map[string][]string{"KAN": {}, "OPS": nil})
+	got = trackerAPICheck(t.Context(), cfg, defaultDeployProbeEnv())
+	assert.Equal(t, deployFail, got.Status, got.Detail)
+	assert.Contains(t, got.Detail, "jira probe failed: jira_probe: project OPS: ")
+}
+
+// TestDoctorJiraAssigneeNamesEveryProject: the assignee read check counts
+// the issues of every configured project and names them.
+func TestDoctorJiraAssigneeNamesEveryProject(t *testing.T) {
+	jqls := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/rest/api/3/myself":
+			_, _ = w.Write([]byte(`{"accountId":"acc-me","displayName":"Itervox Bot"}`))
+		default:
+			var body struct {
+				JQL string `json:"jql"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			jqls <- body.JQL
+			_, _ = w.Write([]byte(`{"issues":[{"id":"1","key":"KAN-1","fields":{}},{"id":"2","key":"OPS-2","fields":{}}],"isLast":true}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	cfg := &config.Config{}
+	cfg.Tracker.Kind = "jira"
+	cfg.Tracker.Endpoint = srv.URL
+	cfg.Tracker.APIKey = "me@example.com:tok"
+	cfg.Tracker.ProjectSlug = "KAN, OPS"
+	cfg.Tracker.ActiveStates = []string{"To Do"}
+	cfg.Tracker.Assignee = "me"
+
+	ac := checkJiraAssignee(t.Context(), cfg)
+
+	assert.Equal(t, `project in ("KAN", "OPS") AND assignee = currentUser() AND status in ("To Do") ORDER BY created ASC`, <-jqls)
+	var b strings.Builder
+	renderAssigneeCheck(&b, ac)
+	assert.Contains(t, b.String(), "assignee reads: OK — 2 issue(s) in the active states of projects KAN, OPS match tracker.assignee and tracker.labels\n")
 }

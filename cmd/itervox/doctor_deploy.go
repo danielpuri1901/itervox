@@ -358,7 +358,7 @@ func trackerAPICheck(ctx context.Context, cfg *config.Config, env deployProbeEnv
 			c.Status, c.Detail = deployFail, "jira probe failed: "+logging.RedactString(err.Error())
 			return c
 		}
-		c.Status, c.Detail = deployOK, "jira token valid (account: "+who+"); project "+cfg.Tracker.ProjectSlug+" can be read"
+		c.Status, c.Detail = deployOK, "jira token valid (account: "+who+"); "+jiraProjectsLabel(cfg.Tracker.ProjectSlug)+" can be read"
 	default:
 		c.Status, c.Detail = deploySkipped, "tracker kind "+cfg.Tracker.Kind+" has no remote API"
 	}

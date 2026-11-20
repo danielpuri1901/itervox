@@ -92,15 +92,16 @@ func (c *Client) FindCommentByKey(ctx context.Context, issueID, key string) (*do
 
 // FetchIssueByIdentifier returns one issue, with comments, by its key
 // (for example "PROJ-12"). A malformed key is rejected with
-// jira_invalid_issue_id, and a key of another project with a
-// tracker.NotFoundError, both before a request is made. An issue that Jira
-// reports under another project's key (a moved issue) also gives a
-// tracker.NotFoundError.
+// jira_invalid_issue_id, and a key of a project that is not configured with
+// a tracker.NotFoundError, both before a request is made. An issue that Jira
+// reports under a key of a project that is not configured (moved there) also
+// gives a tracker.NotFoundError; one moved to another configured project is
+// returned under its new key.
 func (c *Client) FetchIssueByIdentifier(ctx context.Context, identifier string) (*domain.Issue, error) {
 	if !issueKeyPattern.MatchString(identifier) {
 		return nil, fmt.Errorf("jira_invalid_issue_id: %q is not an issue key", identifier)
 	}
-	if !strings.HasPrefix(identifier, c.cfg.ProjectSlug+"-") {
+	if !c.inProjects(identifier) {
 		return nil, &tracker.NotFoundError{Adapter: adapterName, Identifier: identifier}
 	}
 	issue, err := c.FetchIssueDetail(ctx, identifier)
@@ -108,7 +109,7 @@ func (c *Client) FetchIssueByIdentifier(ctx context.Context, identifier string) 
 		return nil, err
 	}
 	// Jira follows a moved key and answers with the issue under its new key.
-	if !strings.HasPrefix(issue.Identifier, c.cfg.ProjectSlug+"-") {
+	if !c.inProjects(issue.Identifier) {
 		return nil, &tracker.NotFoundError{Adapter: adapterName, Identifier: identifier}
 	}
 	return issue, nil
